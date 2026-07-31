@@ -23,10 +23,12 @@ import os
 import math
 from datetime import datetime
 
-from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRectF
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRectF, QThread
 from PySide6.QtGui import (
     QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QIcon, QPixmap
 )
+import traceback
+
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
@@ -35,6 +37,8 @@ from PySide6.QtWidgets import (
 )
 
 from core.styles import Styles, Colors
+from core.las_manager import LasManager
+from core.trajectory_manager import TrajectoryManager
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -54,6 +58,15 @@ class StreamRedirector(QObject):
 
     def flush(self):
         pass
+
+
+class ConsoleBridge(QObject):
+    """Canal seguro para encaminhar mensagens de log da thread de trabalho para a UI."""
+    message_written = Signal(str)
+
+    def write(self, text: str):
+        if text:
+            self.message_written.emit(str(text))
 
 
 class ConsoleWidget(QPlainTextEdit):
@@ -336,6 +349,86 @@ class TrajectoryPanel(QGroupBox):
         return self.path_edit.text().strip()
 
 
+class ProcessingWorker(QObject):
+    started = Signal()
+    finished = Signal(bool, str)
+    progress = Signal(str, int, int, float)
+    file_completed = Signal(str, bool)
+
+    def __init__(self, files, traj_dir, chunk_size, time_margin, log_callback=None):
+        super().__init__()
+        self.files = files
+        self.traj_dir = traj_dir
+        self.chunk_size = chunk_size
+        self.time_margin = time_margin
+        self.log_callback = log_callback
+        self._stop_requested = False
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def _print(self, message: str):
+        if self.log_callback is not None:
+            self.log_callback(str(message))
+        else:
+            print(message)
+
+    def _print_progress(self, file_path: str, processed: int, total: int, elapsed: float):
+        self.progress.emit(file_path, processed, total, elapsed)
+
+    def run(self):
+        self.started.emit()
+        try:
+            trajectory_manager = TrajectoryManager(
+                self.traj_dir,
+                time_margin=self.time_margin,
+                log_callback=self.log_callback,
+            )
+            trajectory_manager.load_all_trajectories()
+            if not trajectory_manager.trajectories:
+                raise RuntimeError("Nenhuma trajetória válida foi carregada.")
+
+            for file_path in self.files:
+                if self._stop_requested:
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏹️ Processamento interrompido pelo usuário.")
+                    self.finished.emit(False, "Interrompido")
+                    return
+
+                self._print(f"[{datetime.now().strftime('%H:%M:%S')}] 📂 Iniciando arquivo: {os.path.basename(file_path)}")
+                worker_manager = LasManager(
+                    file_path,
+                    chunk_size=self.chunk_size,
+                    log_callback=self.log_callback,
+                )
+                try:
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Total de pontos: {worker_manager.total_points:,}")
+                    stats, trajectory_paths, orphan_path, elapsed = worker_manager.process_with_statistics(
+                        trajectory_manager,
+                        output_prefix=os.path.splitext(os.path.basename(file_path))[0],
+                        output_dir=os.path.dirname(file_path),
+                        progress_callback=lambda processed, total, elapsed: self._print_progress(file_path, processed, total, elapsed)
+                    )
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Concluído: {os.path.basename(file_path)}")
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Duração: {elapsed:.1f}s")
+                    for idx, (path, count) in enumerate(zip(trajectory_paths, worker_manager.get_trajectory_counts()), start=1):
+                        self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Trajetória #{idx}: {os.path.basename(path)} -> {count:,} pontos")
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Órfãos: {os.path.basename(orphan_path)} -> {worker_manager.get_orphan_count():,} pontos")
+                    self.file_completed.emit(file_path, True)
+                except Exception as exc:
+                    self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Erro ao processar {os.path.basename(file_path)}: {exc}")
+                    traceback.print_exc()
+                    self.file_completed.emit(file_path, False)
+                finally:
+                    worker_manager.finalize_writers()
+                    worker_manager.close()
+
+            self.finished.emit(True, "Concluído")
+        except Exception as exc:
+            self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Falha durante o processamento: {exc}")
+            traceback.print_exc()
+            self.finished.emit(False, str(exc))
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # JANELA PRINCIPAL
 # ═══════════════════════════════════════════════════════════════════════
@@ -357,6 +450,10 @@ class MainWindow(QMainWindow):
         # Header
         self.header = HeaderBar()
         root.addWidget(self.header)
+
+        self._progress_last_update = 0
+        self._worker_thread = None
+        self._worker = None
 
         # Corpo: splitter esquerda (configurações) / direita (console)
         body = QWidget()
@@ -428,10 +525,12 @@ class MainWindow(QMainWindow):
         TrajectoryManager, etc.) que usar print(...) terá sua saída
         exibida automaticamente aqui, sem precisar conhecer este widget.
         """
+        self._console_bridge = ConsoleBridge()
         self._stdout_redirector = StreamRedirector()
         self._stderr_redirector = StreamRedirector()
-        self._stdout_redirector.text_written.connect(self.console.write_stream)
-        self._stderr_redirector.text_written.connect(self.console.write_stream)
+        self._console_bridge.message_written.connect(self.console.write_stream, type=Qt.QueuedConnection)
+        self._stdout_redirector.text_written.connect(self._console_bridge.write)
+        self._stderr_redirector.text_written.connect(self._console_bridge.write)
 
         sys.stdout = self._stdout_redirector
         sys.stderr = self._stderr_redirector
@@ -448,6 +547,42 @@ class MainWindow(QMainWindow):
         print(f"[{self._timestamp()}] 📂 Arquivos selecionados: {len(self.files_panel.get_files())}")
         print(f"[{self._timestamp()}] 🧭 Pasta de trajetórias: {self.trajectory_panel.get_path() or '(nenhuma)'}")
 
+    def _on_worker_started(self):
+        self.btn_process.setEnabled(False)
+        self.header.set_status("PROCESSANDO", Colors.WARNING)
+        self.status_bar.showMessage("Processando...")
+
+    def _on_worker_progress(self, file_path: str, processed: int, total: int, elapsed: float):
+        if total <= 0:
+            return
+        if processed == total or processed - self._progress_last_update >= max(1_000_000, total // 10):
+            self._progress_last_update = processed
+            print(
+                f"[{self._timestamp()}] ⏳ Processado {processed:,}/{total:,} pontos de "
+                f"{os.path.basename(file_path)} (tempo={elapsed:.1f}s)"
+            )
+
+    def _on_worker_file_completed(self, file_path: str, success: bool):
+        if not success:
+            self.header.set_status("ERRO", Colors.ERROR)
+
+    def _on_worker_finished(self, success: bool, message: str):
+        self.btn_process.setEnabled(True)
+        if success:
+            self.header.set_status("CONCLUÍDO", Colors.SUCCESS)
+            self.status_bar.showMessage("Pronto.")
+            print(f"[{self._timestamp()}] ✅ TODO processamento concluído.")
+        else:
+            self.header.set_status("ERRO", Colors.ERROR)
+            self.status_bar.showMessage("Erro.")
+            print(f"[{self._timestamp()}] ❌ Processamento finalizado com falha: {message}")
+
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+            self._worker_thread = None
+            self._worker = None
+
     def _on_process_clicked(self):
         files = self.files_panel.get_files()
         traj_dir = self.trajectory_panel.get_path()
@@ -462,8 +597,11 @@ class MainWindow(QMainWindow):
             self.header.set_status("ERRO", Colors.ERROR)
             return
 
-        self.header.set_status("PROCESSANDO", Colors.WARNING)
-        self.status_bar.showMessage("Processando...")
+        if self._worker_thread is not None:
+            print(f"[{self._timestamp()}] ⚠️  Processamento já em andamento.")
+            return
+
+        self._progress_last_update = 0
 
         print(f"[{self._timestamp()}] ╔══════════════════════════════════════════╗")
         print(f"[{self._timestamp()}] ║  INICIANDO PROCESSAMENTO                  ║")
@@ -474,16 +612,32 @@ class MainWindow(QMainWindow):
         for i, f in enumerate(files, 1):
             print(f"[{self._timestamp()}]    {i:2d}. {os.path.basename(f)}")
 
-        # TODO: aqui entrará a integração real com
-        # core.las_manager.LasManager e core.trajectory_manager.TrajectoryManager,
-        # reaproveitando este mesmo console (via print) para o log de progresso.
-        print(f"[{self._timestamp()}] ⚠️  Lógica de processamento ainda não conectada "
-              f"(placeholder). Próxima etapa: integrar LasManager/TrajectoryManager.")
-
-        self.header.set_status("CONCLUÍDO", Colors.SUCCESS)
-        self.status_bar.showMessage("Pronto.")
+        self._worker = ProcessingWorker(
+            files=files,
+            traj_dir=traj_dir,
+            chunk_size=constants['CHUNK_SIZE'],
+            time_margin=constants['TIME_MARGIN'],
+            log_callback=self._console_bridge.write,
+        )
+        self._worker_thread = QThread(self)
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.started.connect(self._on_worker_started)
+        self._worker.progress.connect(self._on_worker_progress)
+        self._worker.file_completed.connect(self._on_worker_file_completed)
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.finished.connect(self._worker_thread.quit)
+        self._worker_thread.finished.connect(self._worker_thread.deleteLater)
+        self._worker_thread.start()
 
     def closeEvent(self, event):
+        # Request stop if background processing is active
+        if self._worker is not None:
+            self._worker.request_stop()
+        if self._worker_thread is not None:
+            self._worker_thread.quit()
+            self._worker_thread.wait()
+
         # Restaura stdout/stderr originais ao fechar
         sys.stdout = sys.__stdout__
         sys.stderr = sys.__stderr__

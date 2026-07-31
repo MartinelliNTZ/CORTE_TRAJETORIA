@@ -8,11 +8,18 @@ from scipy.interpolate import interp1d
 
 
 class TrajectoryManager:
-    def __init__(self, traj_dir, time_margin=3.0, extension=".pos"):
+    def __init__(self, traj_dir, time_margin=3.0, extension=".pos", log_callback=None):
         self.traj_dir = traj_dir
         self.time_margin = time_margin
         self.extension = extension
         self.trajectories = []
+        self.log_callback = log_callback
+
+    def _log(self, message):
+        if self.log_callback is not None:
+            self.log_callback(str(message))
+        else:
+            print(str(message))
 
     def _find_files_nocase(self):
         if not os.path.isdir(self.traj_dir):
@@ -86,7 +93,7 @@ class TrajectoryManager:
         # derive interval from actual data
         t_start = float(times[0])
         t_end = float(times[-1])
-        print(f"  ✅ Carregado {os.path.basename(path)} | GPS [{t_start:.3f} - {t_end:.3f}]")
+        self._log(f"  ✅ Carregado {os.path.basename(path)} | GPS [{t_start:.3f} - {t_end:.3f}]")
 
         interp_x = interp1d(times, gx, kind="linear", bounds_error=False, fill_value=(gx[0], gx[-1]))
         interp_y = interp1d(times, gy, kind="linear", bounds_error=False, fill_value=(gy[0], gy[-1]))
@@ -112,7 +119,7 @@ class TrajectoryManager:
                 traj = self._load_pos_file(path)
                 self.trajectories.append(traj)
             except Exception as e:
-                print(f"  ⚠️  Erro ao carregar {os.path.basename(path)}: {e}")
+                self._log(f"  ⚠️  Erro ao carregar {os.path.basename(path)}: {e}")
         
         return self.trajectories
 

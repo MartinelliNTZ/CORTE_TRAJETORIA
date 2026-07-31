@@ -6,7 +6,7 @@ import numpy as np
 
 
 class LasManager:
-    def __init__(self, path, chunk_size=1_000_000):
+    def __init__(self, path, chunk_size=1_000_000, log_callback=None):
         self.path = path
         self.chunk_size = chunk_size
         self.reader = laspy.open(path)
@@ -19,6 +19,13 @@ class LasManager:
         self._orphan_writer = None
         self._orphan_handle = None
         self._orphans = 0
+        self.log_callback = log_callback
+
+    def _log(self, message):
+        if self.log_callback is not None:
+            self.log_callback(str(message))
+        else:
+            print(str(message))
 
     def close(self):
         if self.reader is not None:
@@ -113,6 +120,7 @@ class LasManager:
 
     def prepare_trajectory_writers(self, trajectories, output_prefix, output_dir=None):
         output_dir = output_dir or os.path.dirname(self.path)
+        self._log(f"📦 Preparando {len(trajectories)} arquivo(s) de saída para {os.path.basename(self.path)}")
         self._trajectory_paths = []
         self._trajectory_counts = []
         self._writers = []
@@ -165,6 +173,7 @@ class LasManager:
 
         processed = 0
         start_time = time.time()
+        self._log(f"▶️ Iniciando processamento do arquivo: {os.path.basename(self.path)}")
 
         for chunk in self.chunk_iterator():
             if first_chunk:
@@ -233,6 +242,7 @@ class LasManager:
                     vmax = None
                 result_stats[name] = {"type": "numeric", "mean": mean, "count": count, "min": vmin, "max": vmax}
 
+        self._log(f"✅ Processamento concluído para {os.path.basename(self.path)} ({processed:,} pontos, {elapsed:.1f}s)")
         return result_stats, trajectory_paths, orphan_path, elapsed
 
     def finalize_writers(self):

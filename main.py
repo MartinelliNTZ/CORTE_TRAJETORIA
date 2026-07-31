@@ -10,7 +10,7 @@ from core.las_manager import LasManager
 from core.trajectory_manager import TrajectoryManager
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-TRAJ_DIR = os.path.join(SCRIPT_DIR, "trajetorias")
+TRAJ_DIR = os.path.join(SCRIPT_DIR, "TRAJETORIAS")
 CHUNK_SIZE = 1_000_000
 TIME_MARGIN = 3.0
 LAZ_EXTENSIONS = [".laz", ".las"]

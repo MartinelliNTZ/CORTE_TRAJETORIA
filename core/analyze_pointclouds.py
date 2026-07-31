@@ -1,12 +1,18 @@
-#!/usr/bin/env python3
-"""
-Wrapper simples para o analisador que vive em `core/analyze_pointclouds.py`.
-"""
-
 import glob
 import os
 
-from core.analyze_pointclouds import PointCloudAnalyzer
+from .las_manager import LasManager
+
+
+class PointCloudAnalyzer:
+    def __init__(self, path, chunk_size=1_000_000):
+        self.manager = LasManager(path, chunk_size=chunk_size)
+
+    def analyze(self):
+        return self.manager.compute_statistics()
+
+    def close(self):
+        self.manager.close()
 
 
 def main():
@@ -14,7 +20,6 @@ def main():
     laz_files = sorted(glob.glob(os.path.join(cwd, "*.laz")))
 
     print(f"🔍 Encontrados {len(laz_files)} arquivos .laz")
-    print()
 
     for filepath in laz_files:
         print("\n" + "=" * 80)
@@ -27,9 +32,11 @@ def main():
         finally:
             analyzer.close()
 
-        print(f"Total de atributos: {len(stats)}")
+        total = sum(item.get("count", 0) for item in stats.values() if item["type"] == "numeric")
+        print(f"Total de atributos avaliados: {len(stats)}")
         print(f"{'Atributo':<25} {'Média':>15} {'Tipo':<12}")
         print(f"{'-'*25}{'_'*15}{'-'*12}")
+
         for name in sorted(stats):
             item = stats[name]
             if item["type"] == "numeric":
@@ -41,6 +48,5 @@ def main():
         print(f"✓ Análise completa: {len(stats)} atributos.")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
-

@@ -4,36 +4,45 @@ Este repositório contém dois scripts Python para trabalhar com nuvens de ponto
 
 ## Componentes
 
-### `split_by_trajectory.PY`
-Responsável por dividir uma nuvem de pontos em múltiplas saídas de acordo com trajetórias temporais.
+### `core/las_manager.py`
+Classe `LasManager` responsável por abrir um arquivo `LAZ/LAS`, calcular estatísticas e criar arquivos de saída para cada trajetória.
 
 #### O que faz
-- Localiza um arquivo `*.laz` ou `*.las` na mesma pasta do script.
-- Carrega todos os arquivos `.pos` da subpasta `trajetorias/`.
-- Para cada `.pos`, extrai o intervalo de tempo do nome do arquivo, por exemplo `393922.217_395164.993.pos`.
-- Lê as linhas de dados do `.pos`, ignora cabeçalhos e usa as colunas de GPS (`gx`, `gy`, `gz`) para criar interpoladores de posição com `scipy.interpolate.interp1d`.
-- Abre o arquivo LAZ em chunks de até 1.000.000 de pontos.
-- Para cada ponto, compara o tempo GPS com o intervalo de cada trajetória e calcula a distância 3D entre o ponto e a posição interpolada dessa trajetória.
-- Atribui cada ponto à trajetória mais próxima, quando o tempo está dentro da margem temporal definida.
-- Pontos que não se enquadram em nenhuma trajetória são classificados como `orphans`.
+- Abre a nuvem de pontos com `laspy` usando o mesmo header do arquivo original.
+- Itera o arquivo em chunks definidos por `CHUNK_SIZE`.
+- Calcula média de atributos numéricos e detecta atributos de texto/flags.
+- Prepara writers para cada trajetória e para pontos órfãos.
+- Escreve pontos atribuídos em arquivos separados conforme o resultado de `TrajectoryManager`.
 
-#### Configurações principais
-- `CHUNK_SIZE = 1_000_000`: controla quantos pontos são processados por vez.
-- `TIME_MARGIN = 3.0`: margem em segundos além do intervalo de cada `.pos` para permitir pequenos desalinhamentos.
-- `TRAJ_DIR = trajectorias/`: pasta onde os arquivos `.pos` devem estar.
+### `core/trajectory_manager.py`
+Classe `TrajectoryManager` responsável por carregar arquivos `.pos` e atribuir pontos a trajetórias.
 
-#### Saída
-- Gera um arquivo `.laz` para cada trajetória, com o nome base do arquivo original seguido de `__<trajetoria>.laz`.
-- Cria também um arquivo `__orphans.laz` com pontos não atribuídos.
-- Copia o header completo do LAZ original (`offsets`, `scales`, `vlrs`, projeção, outros metadados) para os arquivos de saída.
+#### O que faz
+- Encontra arquivos `.pos` em `trajetorias/` sem duplicações caso o Windows seja case-insensitive.
+- Extrai intervalo de tempo do nome do arquivo (`TSTART_TEND.pos`).
+- Lê as colunas de tempo e posição GPS e cria interpoladores de posição (`x`, `y`, `z`).
+- Para cada ponto de nuvem, compara o tempo GPS e calcula a distância 3D até cada trajetória válida.
+- Retorna o índice da trajetória mais próxima ou `-1` para órfãos.
 
-#### Detalhes importantes
-- Usa `find_files_nocase()` para evitar duplicação de arquivos em Windows, onde `glob` diferencia maiúsculas/minúsculas de forma inconsistente.
-- Atribuição é feita por distância quadrada (`dist2`) para eficiência.
-- Se houver mais de um arquivo LAZ/LAS na pasta, usa o primeiro encontrado e informa no console.
+### `main.py`
+Ponto de entrada do sistema.
 
-### `analyze_pointclouds.py`
-Faz uma análise simples de atributos em arquivos `*.laz` na pasta atual.
+#### O que faz
+- Define constantes do sistema (`CHUNK_SIZE`, `TIME_MARGIN`, `TRAJ_DIR`).
+- Instancia `TrajectoryManager` e `LasManager`.
+- Carrega trajetórias e analisa a nuvem de pontos.
+- Executa a atribuição de pontos e salva arquivos separados para cada trajetória e para órfãos.
+
+### `core/analyze_pointclouds.py`
+Módulo que reúne a lógica de análise de nuvem de pontos em um pacote reutilizável.
+
+#### O que faz
+- Expõe `PointCloudAnalyzer`, que usa `LasManager` para calcular estatísticas de um arquivo `LAZ`.
+- Pode ser usado diretamente em outros scripts ou via o wrapper `analyze_pointclouds.py`.
+
+#### Observações
+- Não altera nem salva nada quando usado apenas para análise.
+- Depende de `laspy[lazrs]`, `numpy` e `scipy`.
 
 #### O que faz
 - Encontra todos os arquivos `*.laz` no diretório de execução.

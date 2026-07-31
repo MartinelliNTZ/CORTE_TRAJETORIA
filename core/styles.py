@@ -280,11 +280,17 @@ class Styles:
             border-radius: 5px;
             text-align: center;
             color: {c.TEXT};
+            font-weight: 700;
             height: 16px;
         }}
 
         QProgressBar::chunk {{
-            background-color: {c.GOLD};
+            background: qlineargradient(
+                x1: 0, y1: 0, x2: 1, y2: 0,
+                stop: 0 {c.GOLD_LIGHT},
+                stop: 0.5 {c.GOLD},
+                stop: 1 {c.GOLD_DARK}
+            );
             border-radius: 4px;
         }}
 

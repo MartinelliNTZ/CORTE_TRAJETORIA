@@ -18,7 +18,7 @@ Responsabilidades desta versão:
 import sys
 import os
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRectF, QThread
 from PySide6.QtGui import (
@@ -641,19 +641,41 @@ class MainWindow(QMainWindow):
         self._progress_bar.setValue(0)
         self._progress_bar.setFormat("Iniciando...")
 
+    def _format_time_hms(self, seconds: float) -> str:
+        total_seconds = int(round(max(0.0, seconds)))
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        secs = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
     def _on_worker_progress(self, file_path: str, processed: int, total: int, elapsed: float):
         if total <= 0:
             return
-        percent = int(min(100, max(0, (processed * 100) // total)))
+        percent = min(100.0, max(0.0, (processed * 100.0) / total))
+        elapsed_text = self._format_time_hms(elapsed)
+
+        remaining_text = "--:--:--"
+        eta_text = "--:--:--"
+        if processed > 0 and processed < total:
+            remaining = elapsed * (total - processed) / processed
+            remaining_text = self._format_time_hms(remaining)
+            eta_dt = datetime.now() + timedelta(seconds=remaining)
+            eta_text = eta_dt.strftime("%H:%M:%S")
+        elif processed >= total:
+            remaining_text = "00:00:00"
+            eta_text = datetime.now().strftime("%H:%M:%S")
+
         self._progress_bar.setVisible(True)
-        self._progress_bar.setValue(percent)
-        self._progress_bar.setFormat(f"{os.path.basename(file_path)} · {percent}%")
+        self._progress_bar.setValue(int(percent))
+        self._progress_bar.setFormat(
+            f"Tempo decorrido: {elapsed_text}  Restante: {remaining_text}  ETA {eta_text}"
+        )
         self.status_bar.showMessage(f"Processando {os.path.basename(file_path)}...", 1000)
-        if processed == total or processed - self._progress_last_update >= max(1_000_000, total // 10):
+        if processed == total or processed - self._progress_last_update >= max(1_000_000, total // 20):
             self._progress_last_update = processed
             print(
                 f"[{self._timestamp()}] ⏳ Processado {processed:,}/{total:,} pontos de "
-                f"{os.path.basename(file_path)} (tempo={elapsed:.1f}s)"
+                f"{os.path.basename(file_path)} (tempo decorrido={elapsed_text}, restante={remaining_text}, ETA={eta_text})"
             )
 
     def _on_worker_file_completed(self, file_path: str, success: bool):

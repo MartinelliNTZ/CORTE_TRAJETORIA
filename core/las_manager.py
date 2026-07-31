@@ -23,7 +23,10 @@ class LasManager:
 
     def _log(self, message):
         if self.log_callback is not None:
-            self.log_callback(str(message))
+            payload = str(message)
+            if not payload.endswith("\n"):
+                payload += "\n"
+            self.log_callback(payload)
         else:
             print(str(message))
 

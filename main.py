@@ -52,7 +52,10 @@ class StreamRedirector(QObject):
 
     def write(self, text: str):
         if text:
-            self.text_written.emit(str(text))
+            payload = str(text)
+            if not payload.endswith("\n"):
+                payload += "\n"
+            self.text_written.emit(payload)
 
     def flush(self):
         pass
@@ -64,7 +67,10 @@ class ConsoleBridge(QObject):
 
     def write(self, text: str):
         if text:
-            self.message_written.emit(str(text))
+            payload = str(text)
+            if not payload.endswith("\n"):
+                payload += "\n"
+            self.message_written.emit(payload)
 
     def flush(self):
         pass

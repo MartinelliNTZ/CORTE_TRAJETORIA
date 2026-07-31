@@ -6,16 +6,13 @@ Aplicação PySide6 — "CORTE DE TRAJETÓRIA"
 Tema visual: Dark Premium (Preto & Dourado), inspirado em painéis de
 controle de drones.
 
-Responsabilidades desta primeira versão:
+Responsabilidades desta versão:
   • Selecionar um ou mais arquivos .las/.laz
   • Selecionar a pasta de trajetórias
   • Editar as constantes de processamento (CHUNK_SIZE, TIME_MARGIN)
-  • Exibir um console de saída (captura os prints do sistema) que poderá
-    ser reutilizado pelas próximas classes (LasManager, TrajectoryManager...)
-
-As demais classes de negócio (core.las_manager, core.trajectory_manager)
-serão plugadas depois. Basta que elas usem `print(...)` normalmente — o
-console desta janela já captura toda a stdout/stderr da aplicação.
+  • Processar em uma QThread separada (usando LasManager/TrajectoryManager)
+  • Exibir um console de saída (captura os prints do sistema), reutilizável
+    pelas demais classes.
 """
 
 import sys
@@ -25,7 +22,8 @@ from datetime import datetime
 
 from PySide6.QtCore import Qt, QObject, Signal, QTimer, QRectF, QThread
 from PySide6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QIcon, QPixmap
+    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QIcon, QPixmap,
+    QTextCursor
 )
 import traceback
 
@@ -68,13 +66,23 @@ class ConsoleBridge(QObject):
         if text:
             self.message_written.emit(str(text))
 
+    def flush(self):
+        pass
+
 
 class ConsoleWidget(QPlainTextEdit):
     """
     Console de saída reutilizável (estilo terminal/HUD).
-    Outras classes podem simplesmente continuar usando print(...) — não
-    precisam conhecer este widget. Caso queiram escrever diretamente nele,
-    basta chamar `console.append_line(texto)`.
+
+    Correções importantes desta versão:
+      • Usa `appendPlainText`, que SEMPRE escreve no final do documento —
+        não importa onde o usuário clicou/posicionou o cursor. Isso resolve
+        o bug de "clicar no console muda o local onde o texto é inserido".
+      • Faz *buffer* do texto recebido e só materializa uma linha quando um
+        "\\n" completo chega. Isso resolve a quebra de linha incorreta,
+        já que `print()` dispara `write()` uma vez para o conteúdo e outra
+        só para o "\\n" final — se cada `write()` virasse um parágrafo novo
+        teríamos linhas quebradas/duplicadas no meio do texto.
     """
 
     MAX_BLOCKS = 5000
@@ -85,17 +93,46 @@ class ConsoleWidget(QPlainTextEdit):
         self.setReadOnly(True)
         self.setMaximumBlockCount(self.MAX_BLOCKS)
         self.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self._buffer = ""
+        self._pending = ""
 
     def append_line(self, text: str):
-        self.insertPlainText(text)
-        # Auto-scroll para o final
+        """Recebe um pedaço (chunk) de texto vindo do stdout/print e só
+        materializa linhas completas no documento, mantendo o restante em
+        buffer até que o próximo '\\n' chegue."""
+        self._pending += text
+        if "\n" not in self._pending:
+            return
+        *complete_lines, self._pending = self._pending.split("\n")
+        for line in complete_lines:
+            self.appendPlainText(line)
+        self._move_cursor_to_end()
+
+    def flush_pending(self):
+        """Força a exibição de um texto parcial que ainda não recebeu \\n."""
+        if self._pending:
+            self.appendPlainText(self._pending)
+            self._pending = ""
+            self._move_cursor_to_end()
+
+    def _move_cursor_to_end(self):
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.setTextCursor(cursor)
         scrollbar = self.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
     def write_stream(self, text: str):
-        """Slot conectado ao StreamRedirector.text_written."""
+        """Slot conectado ao StreamRedirector/ConsoleBridge."""
         self.append_line(text)
+
+    def clear(self):
+        super().clear()
+        self._pending = ""
+
+    def copy_all_to_clipboard(self):
+        """Copia todo o conteúdo atual do console para a área de transferência."""
+        self.flush_pending()
+        QApplication.clipboard().setText(self.toPlainText())
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -352,7 +389,13 @@ class TrajectoryPanel(QGroupBox):
 class ProcessingWorker(QObject):
     started = Signal()
     finished = Signal(bool, str)
-    progress = Signal(str, int, int, float)
+    # IMPORTANTE: "processed" e "total" usam `object` (não `int`) porque um
+    # sinal Qt tipado como `int` é um C++ int de 32 bits (máx. ~2,1 bilhões).
+    # Nuvens de pontos LAS/LAZ grandes podem facilmente ultrapassar esse
+    # limite, o que disparava "OverflowError" ao emitir o sinal. Com
+    # `object`, o valor Python (int de precisão arbitrária) trafega sem
+    # conversão para C++, então não há mais estouro.
+    progress = Signal(str, object, object, float)
     file_completed = Signal(str, bool)
 
     def __init__(self, files, traj_dir, chunk_size, time_margin, log_callback=None):
@@ -369,12 +412,12 @@ class ProcessingWorker(QObject):
 
     def _print(self, message: str):
         if self.log_callback is not None:
-            self.log_callback(str(message))
+            self.log_callback(str(message) + "\n")
         else:
             print(message)
 
     def _print_progress(self, file_path: str, processed: int, total: int, elapsed: float):
-        self.progress.emit(file_path, processed, total, elapsed)
+        self.progress.emit(file_path, int(processed), int(total), float(elapsed))
 
     def run(self):
         self.started.emit()
@@ -416,7 +459,7 @@ class ProcessingWorker(QObject):
                     self.file_completed.emit(file_path, True)
                 except Exception as exc:
                     self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Erro ao processar {os.path.basename(file_path)}: {exc}")
-                    traceback.print_exc()
+                    self._print(traceback.format_exc())
                     self.file_completed.emit(file_path, False)
                 finally:
                     worker_manager.finalize_writers()
@@ -425,7 +468,7 @@ class ProcessingWorker(QObject):
             self.finished.emit(True, "Concluído")
         except Exception as exc:
             self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Falha durante o processamento: {exc}")
-            traceback.print_exc()
+            self._print(traceback.format_exc())
             self.finished.emit(False, str(exc))
 
 
@@ -496,10 +539,13 @@ class MainWindow(QMainWindow):
 
         console_btn_row = QHBoxLayout()
         btn_clear_console = QPushButton("🧹 Limpar console")
+        btn_copy_console = QPushButton("📋 Copiar console")
         btn_test_console = QPushButton("🧪 Testar console")
         btn_clear_console.clicked.connect(self.console.clear)
+        btn_copy_console.clicked.connect(self._copy_console)
         btn_test_console.clicked.connect(self._test_console)
         console_btn_row.addWidget(btn_clear_console)
+        console_btn_row.addWidget(btn_copy_console)
         console_btn_row.addWidget(btn_test_console)
         console_btn_row.addStretch(1)
         right_layout.addLayout(console_btn_row)
@@ -528,7 +574,10 @@ class MainWindow(QMainWindow):
         self._console_bridge = ConsoleBridge()
         self._stdout_redirector = StreamRedirector()
         self._stderr_redirector = StreamRedirector()
-        self._console_bridge.message_written.connect(self.console.write_stream, type=Qt.QueuedConnection)
+        # Qt.QueuedConnection garante que, mesmo vindo de outra thread
+        # (ProcessingWorker), a atualização do widget só acontece na
+        # thread principal da UI.
+        self._console_bridge.message_written.connect(self.console.write_stream, Qt.QueuedConnection)
         self._stdout_redirector.text_written.connect(self._console_bridge.write)
         self._stderr_redirector.text_written.connect(self._console_bridge.write)
 
@@ -546,6 +595,10 @@ class MainWindow(QMainWindow):
         print(f"[{self._timestamp()}] ⚙️  Constantes atuais: {self.constants_panel.get_constants()}")
         print(f"[{self._timestamp()}] 📂 Arquivos selecionados: {len(self.files_panel.get_files())}")
         print(f"[{self._timestamp()}] 🧭 Pasta de trajetórias: {self.trajectory_panel.get_path() or '(nenhuma)'}")
+
+    def _copy_console(self):
+        self.console.copy_all_to_clipboard()
+        self.status_bar.showMessage("Conteúdo do console copiado para a área de transferência.", 3000)
 
     def _on_worker_started(self):
         self.btn_process.setEnabled(False)

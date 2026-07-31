@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QPlainTextEdit, QSpinBox, QDoubleSpinBox, QFileDialog, QFrame, QSplitter,
-    QStatusBar, QSizePolicy, QAbstractItemView
+    QStatusBar, QSizePolicy, QAbstractItemView, QProgressBar
 )
 
 from core.styles import Styles, Colors
@@ -412,6 +412,9 @@ class ProcessingWorker(QObject):
         self.time_margin = time_margin
         self.log_callback = log_callback
         self._stop_requested = False
+        self._overall_total = 0
+        self._overall_processed = 0
+        self._current_file_processed = 0
 
     def request_stop(self):
         self._stop_requested = True
@@ -423,11 +426,24 @@ class ProcessingWorker(QObject):
             print(message)
 
     def _print_progress(self, file_path: str, processed: int, total: int, elapsed: float):
-        self.progress.emit(file_path, int(processed), int(total), float(elapsed))
+        delta = max(0, int(processed) - self._current_file_processed)
+        self._current_file_processed = int(processed)
+        self._overall_processed += delta
+        self.progress.emit(file_path, int(self._overall_processed), int(self._overall_total), float(elapsed))
 
     def run(self):
         self.started.emit()
         try:
+            self._overall_total = 0
+            self._overall_processed = 0
+            self._current_file_processed = 0
+            for file_path in self.files:
+                worker_manager = LasManager(file_path, chunk_size=self.chunk_size)
+                try:
+                    self._overall_total += int(worker_manager.total_points)
+                finally:
+                    worker_manager.close()
+
             trajectory_manager = TrajectoryManager(
                 self.traj_dir,
                 time_margin=self.time_margin,
@@ -444,6 +460,7 @@ class ProcessingWorker(QObject):
                     return
 
                 self._print(f"[{datetime.now().strftime('%H:%M:%S')}] 📂 Iniciando arquivo: {os.path.basename(file_path)}")
+                self._current_file_processed = 0
                 worker_manager = LasManager(
                     file_path,
                     chunk_size=self.chunk_size,
@@ -503,12 +520,22 @@ class MainWindow(QMainWindow):
         self._progress_last_update = 0
         self._worker_thread = None
         self._worker = None
+        self._overall_total = 0
+        self._overall_processed = 0
+        self._progress_bar = None
 
         # Corpo: splitter esquerda (configurações) / direita (console)
         body = QWidget()
         body_layout = QVBoxLayout(body)
         body_layout.setContentsMargins(16, 16, 16, 16)
         root.addWidget(body)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(False)
+        self._progress_bar.setFormat("Progresso: %p%")
+        body_layout.addWidget(self._progress_bar)
 
         splitter = QSplitter(Qt.Horizontal)
         body_layout.addWidget(splitter)
@@ -610,10 +637,18 @@ class MainWindow(QMainWindow):
         self.btn_process.setEnabled(False)
         self.header.set_status("PROCESSANDO", Colors.WARNING)
         self.status_bar.showMessage("Processando...")
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setFormat("Iniciando...")
 
     def _on_worker_progress(self, file_path: str, processed: int, total: int, elapsed: float):
         if total <= 0:
             return
+        percent = int(min(100, max(0, (processed * 100) // total)))
+        self._progress_bar.setVisible(True)
+        self._progress_bar.setValue(percent)
+        self._progress_bar.setFormat(f"{os.path.basename(file_path)} · {percent}%")
+        self.status_bar.showMessage(f"Processando {os.path.basename(file_path)}...", 1000)
         if processed == total or processed - self._progress_last_update >= max(1_000_000, total // 10):
             self._progress_last_update = processed
             print(
@@ -630,10 +665,14 @@ class MainWindow(QMainWindow):
         if success:
             self.header.set_status("CONCLUÍDO", Colors.SUCCESS)
             self.status_bar.showMessage("Pronto.")
+            self._progress_bar.setValue(100)
+            self._progress_bar.setFormat("Concluído")
             print(f"[{self._timestamp()}] ✅ TODO processamento concluído.")
         else:
             self.header.set_status("ERRO", Colors.ERROR)
             self.status_bar.showMessage("Erro.")
+            self._progress_bar.setValue(0)
+            self._progress_bar.setFormat("Falha")
             print(f"[{self._timestamp()}] ❌ Processamento finalizado com falha: {message}")
 
         if self._worker_thread is not None:

@@ -39,7 +39,9 @@ class TrajectoryManager:
         return float(match.group(1)), float(match.group(2))
 
     def _load_pos_file(self, path):
-        t_start, t_end = self._parse_time_from_filename(path)
+        # NOTE: prefer to obtain t_start/t_end from the actual .pos content
+        # instead of relying on the filename. This avoids mismatches when
+        # filenames are imprecise or use different time bases.
         times, gx, gy, gz = [], [], [], []
 
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -80,6 +82,11 @@ class TrajectoryManager:
         gx = gx[order]
         gy = gy[order]
         gz = gz[order]
+
+        # derive interval from actual data
+        t_start = float(times[0])
+        t_end = float(times[-1])
+        print(f"  ✅ Carregado {os.path.basename(path)} | GPS [{t_start:.3f} - {t_end:.3f}]")
 
         interp_x = interp1d(times, gx, kind="linear", bounds_error=False, fill_value=(gx[0], gx[-1]))
         interp_y = interp1d(times, gy, kind="linear", bounds_error=False, fill_value=(gy[0], gy[-1]))

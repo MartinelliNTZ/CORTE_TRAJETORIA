@@ -1,3 +1,6 @@
 TRAJETORIAS
 *.LAZ
 .venv/
+__pycache__/
+*.pos
+*.las

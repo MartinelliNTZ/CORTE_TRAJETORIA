@@ -1,4 +1,5 @@
 import os
+import time
 
 import laspy
 import numpy as np
@@ -52,7 +53,7 @@ class LasManager:
 
                 numeric_names = [name for name in all_names if name not in text_like_dims]
                 for name in numeric_names:
-                    stats[name] = {"sum": 0.0, "count": 0}
+                    stats[name] = {"sum": 0.0, "count": 0, "min": np.inf, "max": -np.inf}
                 for name in all_names:
                     if name in text_like_dims:
                         stats[name] = {"type": "text", "exists": True}
@@ -67,9 +68,19 @@ class LasManager:
                     continue
 
                 values_float = np.asarray(values, dtype=np.float64)
-                valid = np.isfinite(values_float)
-                stats[name]["sum"] += float(np.nansum(values_float[valid]))
-                stats[name]["count"] += int(np.sum(valid))
+                valid_mask = np.isfinite(values_float)
+                if not np.any(valid_mask):
+                    continue
+
+                valid_vals = values_float[valid_mask]
+                stats[name]["sum"] += float(np.nansum(valid_vals))
+                stats[name]["count"] += int(np.sum(valid_mask))
+                vmin = float(np.nanmin(valid_vals))
+                vmax = float(np.nanmax(valid_vals))
+                if vmin < stats[name]["min"]:
+                    stats[name]["min"] = vmin
+                if vmax > stats[name]["max"]:
+                    stats[name]["max"] = vmax
 
         result = {}
         for name, data in stats.items():
@@ -78,7 +89,14 @@ class LasManager:
             else:
                 count = data["count"]
                 mean = data["sum"] / count if count else 0.0
-                result[name] = {"type": "numeric", "mean": mean, "count": count}
+                vmin = data.get("min", None)
+                vmax = data.get("max", None)
+                # If min/max stayed at inf/-inf, set to None
+                if vmin is not None and (np.isinf(vmin) or np.isnan(vmin)):
+                    vmin = None
+                if vmax is not None and (np.isinf(vmax) or np.isnan(vmax)):
+                    vmax = None
+                result[name] = {"type": "numeric", "mean": mean, "count": count, "min": vmin, "max": vmax}
 
         return result
 
@@ -127,6 +145,95 @@ class LasManager:
         if np.any(orphan_mask):
             self._orphan_writer.write_points(chunk[orphan_mask])
             self._orphans += int(np.sum(orphan_mask))
+
+    def process_with_statistics(self, trajectory_manager, output_prefix, output_dir=None, progress_callback=None):
+        trajectory_paths, orphan_path = self.prepare_trajectory_writers(
+            trajectory_manager.trajectories, output_prefix, output_dir=output_dir
+        )
+
+        stats = {}
+        first_chunk = True
+        text_like_dims = {
+            "synthetic_flag",
+            "keypoint_flag",
+            "withheld_flag",
+            "overlap_flag",
+            "scanner_channel",
+            "classification_flags",
+            "wave_packet_descriptor_index",
+        }
+
+        processed = 0
+        start_time = time.time()
+
+        for chunk in self.chunk_iterator():
+            if first_chunk:
+                if hasattr(chunk.point_format, "dimension_names"):
+                    all_names = list(chunk.point_format.dimension_names)
+                else:
+                    all_names = [dim.name for dim in chunk.point_format.dimensions]
+
+                numeric_names = [name for name in all_names if name not in text_like_dims]
+                for name in numeric_names:
+                    stats[name] = {"sum": 0.0, "count": 0, "min": np.inf, "max": -np.inf}
+                for name in all_names:
+                    if name in text_like_dims:
+                        stats[name] = {"type": "text", "exists": True}
+                first_chunk = False
+
+            for name, data in list(stats.items()):
+                if data.get("type") == "text":
+                    continue
+                try:
+                    values = getattr(chunk, name)
+                except AttributeError:
+                    continue
+
+                values_float = np.asarray(values, dtype=np.float64)
+                valid_mask = np.isfinite(values_float)
+                if not np.any(valid_mask):
+                    continue
+
+                valid_vals = values_float[valid_mask]
+                stats[name]["sum"] += float(np.nansum(valid_vals))
+                stats[name]["count"] += int(np.sum(valid_mask))
+                vmin = float(np.nanmin(valid_vals))
+                vmax = float(np.nanmax(valid_vals))
+                if vmin < stats[name]["min"]:
+                    stats[name]["min"] = vmin
+                if vmax > stats[name]["max"]:
+                    stats[name]["max"] = vmax
+
+            pts = np.column_stack([
+                np.array(chunk.x, dtype=np.float64),
+                np.array(chunk.y, dtype=np.float64),
+                np.array(chunk.z, dtype=np.float64),
+            ])
+            times = np.array(chunk.gps_time, dtype=np.float64)
+            assignment = trajectory_manager.assign_points(pts, times)
+            self.write_assignments(chunk, assignment)
+
+            processed += len(times)
+            elapsed = time.time() - start_time
+            if progress_callback is not None:
+                progress_callback(processed, self.total_points, elapsed)
+
+        result_stats = {}
+        for name, data in stats.items():
+            if data.get("type") == "text":
+                result_stats[name] = {"type": "text", "exists": True}
+            else:
+                count = data["count"]
+                mean = data["sum"] / count if count else 0.0
+                vmin = data.get("min", None)
+                vmax = data.get("max", None)
+                if vmin is not None and (np.isinf(vmin) or np.isnan(vmin)):
+                    vmin = None
+                if vmax is not None and (np.isinf(vmax) or np.isnan(vmax)):
+                    vmax = None
+                result_stats[name] = {"type": "numeric", "mean": mean, "count": count, "min": vmin, "max": vmax}
+
+        return result_stats, trajectory_paths, orphan_path, elapsed
 
     def finalize_writers(self):
         for writer in self._writers:

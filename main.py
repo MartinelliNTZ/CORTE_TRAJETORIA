@@ -65,14 +65,31 @@ def print_statistics(stats, total_points):
     print(f"\n{get_timestamp()} 📊 ESTATÍSTICAS DA NUVEM DE PONTOS:")
     print(f"{get_timestamp()} Total de pontos: {total_points:,}")
     print(f"{get_timestamp()} Total de atributos analisados: {len(stats)}")
-    print(f"{get_timestamp()} {'Atributo':<25} {'Média':>15} {'Tipo':<12}")
-    print(f"{get_timestamp()} {'-'*25}{'_'*15}{'-'*12}")
+    print(f"{get_timestamp()} {'Atributo':<25} {'Média':>12} {'Min':>12} {'Max':>12} {'Tipo':<12}")
+    print(f"{get_timestamp()} {'-'*25}{'-'*12}{'-'*12}{'-'*12}{'-'*12}")
     for name in sorted(stats):
         item = stats[name]
         if item["type"] == "numeric":
-            print(f"{get_timestamp()} {name:<25} {item['mean']:>15.3f} {item['type']:<12}")
+            min_str = f"{item['min']:,.3f}" if item.get('min') is not None else "-"
+            max_str = f"{item['max']:,.3f}" if item.get('max') is not None else "-"
+            print(f"{get_timestamp()} {name:<25} {item['mean']:>12.3f} {min_str:>12} {max_str:>12} {item['type']:<12}")
         else:
-            print(f"{get_timestamp()} {name:<25} {'0.000':>15} {item['type']:<12} [existe]")
+            print(f"{get_timestamp()} {name:<25} {'-':>12} {'-':>12} {'-':>12} {item['type']:<12} [existe]")
+
+
+def progress_report(processed, total_points, elapsed):
+    progress_ratio = processed / total_points if total_points else 0
+    estimated_total = elapsed / progress_ratio if progress_ratio > 0 else float('inf')
+    remaining = max(0, estimated_total - elapsed)
+    eta_seconds = time.time() + remaining
+    remaining_mins = int(remaining // 60)
+    remaining_secs = int(remaining % 60)
+    eta_str = time.strftime("%H:%M:%S", time.localtime(eta_seconds))
+    speed = processed / elapsed if elapsed > 0 else 0
+    print(f"{get_timestamp()} ⏱️  {processed:>12,} / {total_points:,} pontos  "
+          f"({progress_ratio*100:>5.1f}%) | "
+          f"Velocidade: {speed:>10,.0f} pts/s | "
+          f"{remaining_mins}m {remaining_secs}s restantes | ETA: {eta_str}")
 
 
 def main():
@@ -117,63 +134,19 @@ def main():
     print(f"{get_timestamp()} 📍 Total de pontos na nuvem: {las_manager.total_points:,}")
 
     try:
-        print(f"{get_timestamp()} 🔄 Calculando estatísticas dos atributos...")
-        stats = las_manager.compute_statistics()
-        print_statistics(stats, las_manager.total_points)
+        print(f"{get_timestamp()} 🔄 Calculando estatísticas dos atributos e processando cortes em uma única passagem...")
+        print(f"{get_timestamp()} 🚀 Iniciando processamento combinado (estatísticas + cortes)")
+        print(f"{get_timestamp()} {'─' * 82}")
 
-        # ─── ETAPA 4: PROCESSAMENTO E DIVISIONAMENTO ───
-        print(f"\n{get_timestamp()} [ETAPA 4/4] Preparando divisão por trajetórias...")
-        trajectory_paths, orphan_path = las_manager.prepare_trajectory_writers(
-            trajectories, output_prefix=laz_name, output_dir=SCRIPT_DIR
+        stats, trajectory_paths, orphan_path, elapsed_total = las_manager.process_with_statistics(
+            trajectory_manager,
+            output_prefix=laz_name,
+            output_dir=SCRIPT_DIR,
+            progress_callback=progress_report,
         )
-        print(f"{get_timestamp()} ✅ Arquivos de saída preparados ({len(trajectories)} trajetórias + orphans)")
-
-        print(f"\n{get_timestamp()} 🚀 INICIANDO PROCESSAMENTO DE PONTOS...")
-        print(f"{get_timestamp()} {'─' * 82}")
-
-        processed = 0
-        start_time = time.time()
-        chunk_num = 0
-        
-        for chunk in las_manager.chunk_iterator():
-            chunk_num += 1
-            chunk_size = len(chunk.x)
-            
-            pts = np.column_stack([
-                np.array(chunk.x, dtype=np.float64),
-                np.array(chunk.y, dtype=np.float64),
-                np.array(chunk.z, dtype=np.float64),
-            ])
-            times = np.array(chunk.gps_time, dtype=np.float64)
-            
-            print(f"{get_timestamp()} 📦 Chunk {chunk_num}: Processando {chunk_size:,} pontos...")
-            assignment = trajectory_manager.assign_points(pts, times)
-            las_manager.write_assignments(chunk, assignment)
-
-            processed += len(times)
-            elapsed = time.time() - start_time
-            progress_ratio = processed / las_manager.total_points if las_manager.total_points else 0
-            
-            if progress_ratio > 0:
-                estimated_total = elapsed / progress_ratio
-                remaining = max(0, estimated_total - elapsed)
-                eta_seconds = time.time() + remaining
-                remaining_mins = int(remaining // 60)
-                remaining_secs = int(remaining % 60)
-                eta_str = time.strftime("%H:%M:%S", time.localtime(eta_seconds))
-                speed = processed / elapsed if elapsed > 0 else 0
-                print(f"{get_timestamp()} ⏱️  {processed:>12,} / {las_manager.total_points:,} pontos  "
-                      f"({progress_ratio*100:>5.1f}%) | "
-                      f"Velocidade: {speed:>10,.0f} pts/s | "
-                      f"{remaining_mins}m {remaining_secs}s restantes | ETA: {eta_str}")
-            else:
-                print(f"{get_timestamp()} ⏱️  {processed:>12,} / {las_manager.total_points:,} pontos  "
-                      f"({progress_ratio*100:>5.1f}%)")
 
         print(f"{get_timestamp()} {'─' * 82}")
-        
         las_manager.finalize_writers()
-        elapsed_total = time.time() - start_time
         print(f"\n{get_timestamp()} ✅ PROCESSAMENTO CONCLUÍDO COM SUCESSO!")
         print(f"{get_timestamp()} ⏱️  Tempo total: {int(elapsed_total // 60)}m {int(elapsed_total % 60)}s")
         

@@ -99,7 +99,14 @@ class TrajectoryManager:
         if not pos_files:
             raise FileNotFoundError(f"ERRO: Nenhum .pos encontrado em: {self.traj_dir}")
 
-        self.trajectories = [self._load_pos_file(path) for path in pos_files]
+        self.trajectories = []
+        for i, path in enumerate(pos_files, 1):
+            try:
+                traj = self._load_pos_file(path)
+                self.trajectories.append(traj)
+            except Exception as e:
+                print(f"  ⚠️  Erro ao carregar {os.path.basename(path)}: {e}")
+        
         return self.trajectories
 
     def assign_points(self, points, times):

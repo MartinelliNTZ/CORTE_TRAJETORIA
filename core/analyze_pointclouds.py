@@ -1,52 +1,74 @@
+#!/usr/bin/env python3
+"""
+Wrapper simples para o analisador que vive em `core/analyze_pointclouds.py`.
+"""
+
 import glob
 import os
+from datetime import datetime
 
-from .las_manager import LasManager
+from core.analyze_pointclouds import PointCloudAnalyzer
 
 
-class PointCloudAnalyzer:
-    def __init__(self, path, chunk_size=1_000_000):
-        self.manager = LasManager(path, chunk_size=chunk_size)
-
-    def analyze(self):
-        return self.manager.compute_statistics()
-
-    def close(self):
-        self.manager.close()
+def get_timestamp():
+    """Retorna o horário atual no formato [HH:MM:SS]."""
+    return datetime.now().strftime("[%H:%M:%S]")
 
 
 def main():
     cwd = os.path.abspath(os.path.dirname(__file__))
     laz_files = sorted(glob.glob(os.path.join(cwd, "*.laz")))
 
-    print(f"🔍 Encontrados {len(laz_files)} arquivos .laz")
+    print(f"{get_timestamp()} 🔍 Encontrados {len(laz_files)} arquivo(s) .laz\n")
 
-    for filepath in laz_files:
-        print("\n" + "=" * 80)
-        print(f"{os.path.basename(filepath):^80}")
-        print("=" * 80)
+    if not laz_files:
+        print(f"{get_timestamp()} ⚠️  Nenhum arquivo .laz encontrado no diretório: {cwd}\n")
+        return
 
-        analyzer = PointCloudAnalyzer(filepath)
+    for idx, filepath in enumerate(laz_files, 1):
+        print(f"\n{get_timestamp()} {'='*80}")
+        print(f"{get_timestamp()} Arquivo {idx}/{len(laz_files)}: {os.path.basename(filepath):^76}")
+        print(f"{get_timestamp()} {'='*80}")
+
         try:
-            stats = analyzer.analyze()
-        finally:
-            analyzer.close()
+            print(f"{get_timestamp()} 📂 Caminho completo: {filepath}")
+            file_size_mb = os.path.getsize(filepath) / (1024 * 1024)
+            print(f"{get_timestamp()} 📏 Tamanho do arquivo: {file_size_mb:.2f} MB")
+            
+            print(f"{get_timestamp()} 🔄 Abrindo e analisando...")
+            analyzer = PointCloudAnalyzer(filepath)
+            try:
+                stats = analyzer.analyze()
+            finally:
+                analyzer.close()
 
-        total = sum(item.get("count", 0) for item in stats.values() if item["type"] == "numeric")
-        print(f"Total de atributos avaliados: {len(stats)}")
-        print(f"{'Atributo':<25} {'Média':>15} {'Tipo':<12}")
-        print(f"{'-'*25}{'_'*15}{'-'*12}")
+            print(f"{get_timestamp()} ✅ Análise concluída com sucesso!")
+            print(f"{get_timestamp()} 📊 Atributos encontrados: {len(stats)}")
+            print(f"{get_timestamp()} {'Atributo':<25} {'Média':>15} {'Tipo':<12}")
+            print(f"{get_timestamp()} {'-'*25}{'_'*15}{'-'*12}")
+            
+            numeric_count = 0
+            text_count = 0
+            for name in sorted(stats):
+                item = stats[name]
+                if item["type"] == "numeric":
+                    print(f"{get_timestamp()} {name:<25} {item['mean']:>15.3f} {item['type']:<12}")
+                    numeric_count += 1
+                else:
+                    print(f"{get_timestamp()} {name:<25} {'0.000':>15} {item['type']:<12} [existe]")
+                    text_count += 1
+            
+            print(f"{get_timestamp()} {'-'*25}{'_'*15}{'-'*12}")
+            print(f"{get_timestamp()} Resumo: {numeric_count} numéricos + {text_count} texto/flags = {len(stats)} total")
+            print(f"{get_timestamp()} {'_'*80}")
+        except Exception as e:
+            print(f"{get_timestamp()} ❌ Erro ao processar {os.path.basename(filepath)}: {e}")
+            import traceback
+            traceback.print_exc()
 
-        for name in sorted(stats):
-            item = stats[name]
-            if item["type"] == "numeric":
-                print(f"{name:<25} {item['mean']:>15.3f} {item['type']:<12}")
-            else:
-                print(f"{name:<25} {'0.000':>15} {item['type']:<12} [existe]")
-
-        print("_" * 80)
-        print(f"✓ Análise completa: {len(stats)} atributos.")
+    print(f"\n{get_timestamp()} ✅ Análise finalizada!\n")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
+

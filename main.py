@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from core.styles import Styles, Colors
 from core.las_manager import LasManager
 from core.trajectory_manager import TrajectoryManager
+from core.preferences import load_preferences, save_preferences, PREFERENCES_PATH
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -282,6 +283,8 @@ class HeaderBar(QFrame):
 # PAINEL: CONSTANTES DE PROCESSAMENTO
 # ═══════════════════════════════════════════════════════════════════════
 class ConstantsPanel(QGroupBox):
+    changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__("Constantes de Processamento", parent)
         grid = QGridLayout(self)
@@ -309,6 +312,13 @@ class ConstantsPanel(QGroupBox):
         hint.setWordWrap(True)
         grid.addWidget(hint, 2, 0, 1, 2)
 
+        self.chunk_size_spin.valueChanged.connect(self.changed)
+        self.time_margin_spin.valueChanged.connect(self.changed)
+
+    def set_constants(self, chunk_size: int, time_margin: float):
+        self.chunk_size_spin.setValue(int(chunk_size))
+        self.time_margin_spin.setValue(float(time_margin))
+
     def get_constants(self) -> dict:
         return {
             "CHUNK_SIZE": self.chunk_size_spin.value(),
@@ -320,6 +330,8 @@ class ConstantsPanel(QGroupBox):
 # PAINEL: SELEÇÃO DE ARQUIVOS .LAS / .LAZ
 # ═══════════════════════════════════════════════════════════════════════
 class FilesPanel(QGroupBox):
+    changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__("Arquivos LAS / LAZ", parent)
         layout = QVBoxLayout(self)
@@ -343,7 +355,9 @@ class FilesPanel(QGroupBox):
 
         self.btn_add.clicked.connect(self._add_files)
         self.btn_remove.clicked.connect(self._remove_selected)
-        self.btn_clear.clicked.connect(self.file_list.clear)
+        self.btn_clear.clicked.connect(self._clear_all)
+        self.file_list.model().rowsInserted.connect(self.changed)
+        self.file_list.model().rowsRemoved.connect(self.changed)
 
     def _add_files(self):
         files, _ = QFileDialog.getOpenFileNames(
@@ -361,6 +375,15 @@ class FilesPanel(QGroupBox):
         for item in self.file_list.selectedItems():
             self.file_list.takeItem(self.file_list.row(item))
 
+    def _clear_all(self):
+        self.file_list.clear()
+
+    def set_files(self, files: list):
+        self.file_list.clear()
+        for f in files:
+            if f and f not in self.get_files():
+                self.file_list.addItem(QListWidgetItem(f))
+
     def get_files(self) -> list:
         return [self.file_list.item(i).text() for i in range(self.file_list.count())]
 
@@ -369,6 +392,8 @@ class FilesPanel(QGroupBox):
 # PAINEL: PASTA DE TRAJETÓRIAS
 # ═══════════════════════════════════════════════════════════════════════
 class TrajectoryPanel(QGroupBox):
+    changed = Signal()
+
     def __init__(self, parent=None):
         super().__init__("Pasta de Trajetórias", parent)
         layout = QHBoxLayout(self)
@@ -387,6 +412,10 @@ class TrajectoryPanel(QGroupBox):
         folder = QFileDialog.getExistingDirectory(self, "Selecionar pasta de trajetórias")
         if folder:
             self.path_edit.setText(folder)
+            self.changed.emit()
+
+    def set_path(self, path: str):
+        self.path_edit.setText(path or "")
 
     def get_path(self) -> str:
         return self.path_edit.text().strip()
@@ -596,6 +625,15 @@ class MainWindow(QMainWindow):
 
         self._setup_stdout_redirect()
 
+        # Carrega as preferências salvas (arquivos, pasta de trajetórias,
+        # constantes de processamento) e passa a salvá-las automaticamente
+        # sempre que o usuário alterar qualquer configuração.
+        self._load_preferences()
+
+        self.constants_panel.changed.connect(self._save_preferences)
+        self.files_panel.changed.connect(self._save_preferences)
+        self.trajectory_panel.changed.connect(self._save_preferences)
+
     # ─────────────────────────────────────────────────────────────
     def _setup_stdout_redirect(self):
         """
@@ -618,6 +656,45 @@ class MainWindow(QMainWindow):
         sys.stderr = self._stderr_redirector
 
         print(f"[{self._timestamp()}] ✅ Console inicializado. Pronto para uso por outras classes.")
+
+    # ─────────────────────────────────────────────────────────────
+    # PREFERÊNCIAS (core/preferences.json)
+    # ─────────────────────────────────────────────────────────────
+    def _load_preferences(self):
+        """
+        Carrega as preferências salvas em core/preferences.json e aplica
+        nos painéis da interface (arquivos, pasta de trajetórias e
+        constantes de processamento).
+        """
+        prefs = load_preferences(PREFERENCES_PATH)
+
+        files = [f for f in prefs.get("files", []) if os.path.isfile(f)]
+        traj_dir = prefs.get("trajectory_dir", "")
+        constants = prefs.get("constants", {})
+
+        self.files_panel.set_files(files)
+        self.trajectory_panel.set_path(traj_dir)
+        self.constants_panel.set_constants(
+            constants.get("CHUNK_SIZE", 1_000_000),
+            constants.get("TIME_MARGIN", 3.0),
+        )
+
+        print(f"[{self._timestamp()}] ⚙️  Preferências carregadas de: {PREFERENCES_PATH}")
+        print(f"[{self._timestamp()}] 📂 Arquivos restaurados: {len(files)}")
+        print(f"[{self._timestamp()}] 🧭 Pasta de trajetórias: {traj_dir or '(nenhuma)'}")
+
+    def _save_preferences(self):
+        """
+        Coleta o estado atual dos painéis e salva em core/preferences.json.
+        Chamado automaticamente sempre que qualquer configuração muda e
+        também no fechamento da janela.
+        """
+        preferences = {
+            "files": self.files_panel.get_files(),
+            "trajectory_dir": self.trajectory_panel.get_path(),
+            "constants": self.constants_panel.get_constants(),
+        }
+        save_preferences(preferences, PREFERENCES_PATH)
 
     @staticmethod
     def _timestamp() -> str:
@@ -751,6 +828,9 @@ class MainWindow(QMainWindow):
         self._worker_thread.start()
 
     def closeEvent(self, event):
+        # Salva as preferências atuais antes de fechar
+        self._save_preferences()
+
         # Request stop if background processing is active
         if self._worker is not None:
             self._worker.request_stop()

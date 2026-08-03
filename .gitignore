@@ -4,3 +4,4 @@ TRAJETORIAS
 __pycache__/
 *.pos
 *.las
+*.lidata

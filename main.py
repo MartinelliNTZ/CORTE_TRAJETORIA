@@ -668,7 +668,7 @@ class MainWindow(QMainWindow):
         self._progress_bar.setVisible(True)
         self._progress_bar.setValue(int(percent))
         self._progress_bar.setFormat(
-            f"Tempo decorrido: {elapsed_text}  Restante: {remaining_text}  ETA {eta_text}"
+            f"{processed:,}/{total:,} pts · Tempo decorrido: {elapsed_text}  Restante: {remaining_text}  ETA {eta_text}  {percent:.3f}%"
         )
         self.status_bar.showMessage(f"Processando {os.path.basename(file_path)}...", 1000)
         if processed == total or processed - self._progress_last_update >= max(1_000_000, total // 20):

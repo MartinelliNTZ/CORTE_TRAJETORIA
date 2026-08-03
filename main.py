@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QPushButton, QLineEdit, QListWidget, QListWidgetItem,
     QPlainTextEdit, QSpinBox, QDoubleSpinBox, QFileDialog, QFrame, QSplitter,
-    QStatusBar, QSizePolicy, QAbstractItemView, QProgressBar
+    QStatusBar, QSizePolicy, QAbstractItemView, QProgressBar, QComboBox
 )
 
 from core.styles import Styles, Colors
@@ -307,22 +307,34 @@ class ConstantsPanel(QGroupBox):
         self.time_margin_spin.setValue(3.0)
         grid.addWidget(self.time_margin_spin, 1, 1)
 
+        grid.addWidget(QLabel("Formato de saída:"), 2, 0)
+        self.output_format_combo = QComboBox()
+        self.output_format_combo.addItem("LAZ (comprimido)", "laz")
+        self.output_format_combo.addItem("LAS (sem compressão)", "las")
+        self.output_format_combo.setCurrentIndex(0)
+        grid.addWidget(self.output_format_combo, 2, 1)
+
         hint = QLabel("Estes valores substituem os padrões definidos no script original.")
         hint.setProperty("role", "hint")
         hint.setWordWrap(True)
-        grid.addWidget(hint, 2, 0, 1, 2)
+        grid.addWidget(hint, 3, 0, 1, 2)
 
         self.chunk_size_spin.valueChanged.connect(self.changed)
         self.time_margin_spin.valueChanged.connect(self.changed)
+        self.output_format_combo.currentIndexChanged.connect(self.changed)
 
-    def set_constants(self, chunk_size: int, time_margin: float):
+    def set_constants(self, chunk_size: int, time_margin: float, output_format: str = "laz"):
         self.chunk_size_spin.setValue(int(chunk_size))
         self.time_margin_spin.setValue(float(time_margin))
+        idx = self.output_format_combo.findData(output_format.lower())
+        if idx >= 0:
+            self.output_format_combo.setCurrentIndex(idx)
 
     def get_constants(self) -> dict:
         return {
             "CHUNK_SIZE": self.chunk_size_spin.value(),
             "TIME_MARGIN": self.time_margin_spin.value(),
+            "OUTPUT_FORMAT": self.output_format_combo.currentData(),
         }
 
 
@@ -433,26 +445,18 @@ class ProcessingWorker(QObject):
     progress = Signal(str, object, object, float)
     file_completed = Signal(str, bool)
 
-    def __init__(self, files, traj_dir, chunk_size, time_margin, log_callback=None):
+    def __init__(self, files, traj_dir, chunk_size, time_margin, output_format="laz", log_callback=None):
         super().__init__()
         self.files = files
         self.traj_dir = traj_dir
         self.chunk_size = chunk_size
         self.time_margin = time_margin
+        self.output_format = output_format
         self.log_callback = log_callback
         self._stop_requested = False
         self._overall_total = 0
         self._overall_processed = 0
         self._current_file_processed = 0
-
-    def request_stop(self):
-        self._stop_requested = True
-
-    def _print(self, message: str):
-        if self.log_callback is not None:
-            self.log_callback(str(message) + "\n")
-        else:
-            print(message)
 
     def _print_progress(self, file_path: str, processed: int, total: int, elapsed: float):
         delta = max(0, int(processed) - self._current_file_processed)
@@ -490,6 +494,13 @@ class ProcessingWorker(QObject):
 
                 self._print(f"[{datetime.now().strftime('%H:%M:%S')}] 📂 Iniciando arquivo: {os.path.basename(file_path)}")
                 self._current_file_processed = 0
+
+                # Cria a pasta de resultados com o nome do arquivo de entrada,
+                # dentro da pasta do arquivo de origem.
+                base_name = os.path.splitext(os.path.basename(file_path))[0]
+                output_dir = os.path.join(os.path.dirname(file_path), base_name)
+                os.makedirs(output_dir, exist_ok=True)
+
                 worker_manager = LasManager(
                     file_path,
                     chunk_size=self.chunk_size,
@@ -499,9 +510,11 @@ class ProcessingWorker(QObject):
                     self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Total de pontos: {worker_manager.total_points:,}")
                     stats, trajectory_paths, orphan_path, elapsed = worker_manager.process_with_statistics(
                         trajectory_manager,
-                        output_prefix=os.path.splitext(os.path.basename(file_path))[0],
-                        output_dir=os.path.dirname(file_path),
-                        progress_callback=lambda processed, total, elapsed: self._print_progress(file_path, processed, total, elapsed)
+                        output_prefix=base_name,
+                        output_dir=output_dir,
+                        output_format=self.output_format,
+                        progress_callback=lambda processed, total, elapsed: self._print_progress(file_path, processed, total, elapsed),
+                        stop_callback=lambda: self._stop_requested,
                     )
                     self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Concluído: {os.path.basename(file_path)}")
                     self._print(f"[{datetime.now().strftime('%H:%M:%S')}]   Duração: {elapsed:.1f}s")
@@ -522,6 +535,15 @@ class ProcessingWorker(QObject):
             self._print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Falha durante o processamento: {exc}")
             self._print(traceback.format_exc())
             self.finished.emit(False, str(exc))
+
+    def request_stop(self):
+        self._stop_requested = True
+
+    def _print(self, message: str):
+        if self.log_callback is not None:
+            self.log_callback(str(message) + "\n")
+        else:
+            print(message)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -589,6 +611,13 @@ class MainWindow(QMainWindow):
         self.btn_process.setMinimumHeight(40)
         self.btn_process.clicked.connect(self._on_process_clicked)
         action_row.addWidget(self.btn_process)
+
+        self.btn_cancel = QPushButton("⏹️ CANCELAR")
+        self.btn_cancel.setObjectName("dangerButton")
+        self.btn_cancel.setMinimumHeight(40)
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        action_row.addWidget(self.btn_cancel)
         left_layout.addLayout(action_row)
 
         left_layout.addStretch(0)
@@ -677,6 +706,7 @@ class MainWindow(QMainWindow):
         self.constants_panel.set_constants(
             constants.get("CHUNK_SIZE", 1_000_000),
             constants.get("TIME_MARGIN", 3.0),
+            constants.get("OUTPUT_FORMAT", "laz"),
         )
 
         print(f"[{self._timestamp()}] ⚙️  Preferências carregadas de: {PREFERENCES_PATH}")
@@ -712,6 +742,7 @@ class MainWindow(QMainWindow):
 
     def _on_worker_started(self):
         self.btn_process.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.header.set_status("PROCESSANDO", Colors.WARNING)
         self.status_bar.showMessage("Processando...")
         self._progress_bar.setVisible(True)
@@ -759,8 +790,17 @@ class MainWindow(QMainWindow):
         if not success:
             self.header.set_status("ERRO", Colors.ERROR)
 
+    def _on_cancel_clicked(self):
+        if self._worker is not None:
+            self._worker.request_stop()
+            self.btn_cancel.setEnabled(False)
+            self.btn_cancel.setText("⏹️ CANCELANDO...")
+            print(f"[{self._timestamp()}] ⏹️ Cancelamento solicitado pelo usuário...")
+
     def _on_worker_finished(self, success: bool, message: str):
         self.btn_process.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setText("⏹️ CANCELAR")
         if success:
             self.header.set_status("CONCLUÍDO", Colors.SUCCESS)
             self.status_bar.showMessage("Pronto.")
@@ -805,6 +845,7 @@ class MainWindow(QMainWindow):
         print(f"[{self._timestamp()}] ╚══════════════════════════════════════════╝")
         print(f"[{self._timestamp()}] ⚙️  CHUNK_SIZE: {constants['CHUNK_SIZE']:,}")
         print(f"[{self._timestamp()}] ⚙️  TIME_MARGIN: {constants['TIME_MARGIN']}s")
+        print(f"[{self._timestamp()}] 💾 Formato de saída: {constants['OUTPUT_FORMAT'].upper()}")
         print(f"[{self._timestamp()}] 🧭 Pasta de trajetórias: {traj_dir}")
         for i, f in enumerate(files, 1):
             print(f"[{self._timestamp()}]    {i:2d}. {os.path.basename(f)}")
@@ -814,6 +855,7 @@ class MainWindow(QMainWindow):
             traj_dir=traj_dir,
             chunk_size=constants['CHUNK_SIZE'],
             time_margin=constants['TIME_MARGIN'],
+            output_format=constants['OUTPUT_FORMAT'],
             log_callback=self._console_bridge.write,
         )
         self._worker_thread = QThread(self)

@@ -121,26 +121,34 @@ class LasManager:
         new_header.global_encoding.wkt = True
         return new_header
 
-    def prepare_trajectory_writers(self, trajectories, output_prefix, output_dir=None):
+    def prepare_trajectory_writers(self, trajectories, output_prefix, output_dir=None, output_format="laz"):
         output_dir = output_dir or os.path.dirname(self.path)
+        output_format = output_format.lower()
+        if output_format not in ("las", "laz"):
+            output_format = "laz"
+        do_compress = output_format == "laz"
+        ext = f".{output_format}"
+
         self._log(f"📦 Preparando {len(trajectories)} arquivo(s) de saída para {os.path.basename(self.path)}")
+        self._log(f"📁 Pasta de resultados: {output_dir}")
+        self._log(f"💾 Formato de saída: {output_format.upper()}")
         self._trajectory_paths = []
         self._trajectory_counts = []
         self._writers = []
         self._handles = []
 
         for traj in trajectories:
-            out_path = os.path.join(output_dir, f"{output_prefix}__{traj['name']}.laz")
+            out_path = os.path.join(output_dir, f"{output_prefix}__{traj['name']}{ext}")
             self._trajectory_paths.append(out_path)
             self._trajectory_counts.append(0)
             handle = open(out_path, "wb")
             self._handles.append(handle)
-            writer = laspy.LasWriter(handle, header=self._copy_header(), do_compress=True)
+            writer = laspy.LasWriter(handle, header=self._copy_header(), do_compress=do_compress)
             self._writers.append(writer)
 
-        orphan_path = os.path.join(output_dir, f"{output_prefix}__orphans.laz")
+        orphan_path = os.path.join(output_dir, f"{output_prefix}__orphans{ext}")
         self._orphan_handle = open(orphan_path, "wb")
-        self._orphan_writer = laspy.LasWriter(self._orphan_handle, header=self._copy_header(), do_compress=True)
+        self._orphan_writer = laspy.LasWriter(self._orphan_handle, header=self._copy_header(), do_compress=do_compress)
         self._orphans = 0
 
         return self._trajectory_paths, orphan_path
@@ -157,9 +165,9 @@ class LasManager:
             self._orphan_writer.write_points(chunk[orphan_mask])
             self._orphans += int(np.sum(orphan_mask))
 
-    def process_with_statistics(self, trajectory_manager, output_prefix, output_dir=None, progress_callback=None):
+    def process_with_statistics(self, trajectory_manager, output_prefix, output_dir=None, output_format="laz", progress_callback=None, stop_callback=None):
         trajectory_paths, orphan_path = self.prepare_trajectory_writers(
-            trajectory_manager.trajectories, output_prefix, output_dir=output_dir
+            trajectory_manager.trajectories, output_prefix, output_dir=output_dir, output_format=output_format
         )
 
         stats = {}
@@ -179,6 +187,11 @@ class LasManager:
         self._log(f"▶️ Iniciando processamento do arquivo: {os.path.basename(self.path)}")
 
         for chunk in self.chunk_iterator():
+            if stop_callback is not None and stop_callback():
+                self._log(f"⏹️ Cancelamento solicitado durante o processamento de {os.path.basename(self.path)}")
+                self.finalize_writers()
+                raise RuntimeError("Processamento cancelado pelo usuário")
+
             if first_chunk:
                 if hasattr(chunk.point_format, "dimension_names"):
                     all_names = list(chunk.point_format.dimension_names)

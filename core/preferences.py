@@ -29,6 +29,7 @@ DEFAULT_PREFERENCES = {
     "constants": {
         "CHUNK_SIZE": 1_000_000,
         "TIME_MARGIN": 3.0,
+        "OUTPUT_FORMAT": "laz",
     },
 }
 

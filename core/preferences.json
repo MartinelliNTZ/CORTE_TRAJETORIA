@@ -1,6 +1,8 @@
 {
-  "files": [],
-  "trajectory_dir": "",
+  "files": [
+    "F:/TESTES_PYTHON/CORTE_TRAJETORIA/GEOTERRA_NUVEM_PONTOS_20260710_11_12_13_14.laz"
+  ],
+  "trajectory_dir": "F:/TESTES_PYTHON/CORTE_TRAJETORIA/TRAJETORIAS",
   "constants": {
     "CHUNK_SIZE": 1000000,
     "TIME_MARGIN": 3.0,
